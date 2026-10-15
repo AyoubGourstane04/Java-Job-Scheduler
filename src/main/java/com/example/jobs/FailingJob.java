@@ -19,6 +19,11 @@ public class FailingJob implements Job {
 
     @Override
     public void execute() throws Exception {
-        Thread.currentThread().interrupt();
+        System.out.println(
+                Thread.currentThread().getName()
+                        + " executing " + id
+        );
+
+        throw new Exception("Simulated job failure!");
     }
 }

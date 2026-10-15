@@ -17,11 +17,11 @@ public class EmailJob implements Job {
 
     @Override
     public void execute() throws InterruptedException {
-        System.out.println(Thread.currentThread().getName() + " executing Job " + this.id);
+        System.out.println(Thread.currentThread().getName() + " executing Job :  " + this.id);
 
         Thread.sleep(1000);
 
-        System.out.println("Job " + this.id + " Finished");
+        System.out.println("Job : " + this.id + " Finished");
 
     }
 }

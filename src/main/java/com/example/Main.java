@@ -1,54 +1,46 @@
 package com.example;
 
-import com.example.core.Worker;
+import com.example.core.JobScheduler;
 import com.example.jobs.EmailJob;
 import com.example.jobs.FailingJob;
-import com.example.model.Job;
+import com.example.model.JobStatus;
 
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.atomic.AtomicInteger;
 
 public class Main {
-    public static void main(String[] args) throws InterruptedException {
-        BlockingQueue<Job> queue = new LinkedBlockingQueue<>(5);
-        AtomicInteger completedJobs = new AtomicInteger();
+    public static void main(String[] args)
+            throws Exception {
 
-        long startTime = System.currentTimeMillis();
+        JobScheduler scheduler = new JobScheduler(3, 10);
 
-        Thread worker1 = new Thread(new Worker(queue, completedJobs), "worker-1");
-        Thread worker2 = new Thread(new Worker(queue, completedJobs), "worker-2");
-        Thread worker3 = new Thread(new Worker(queue, completedJobs), "worker-3");
+        scheduler.submitJob(new FailingJob("job-fail"));
 
-
-        worker1.start();
-        worker2.start();
-        worker3.start();
-
-        for (int i=1; i<=30; i++){
-            queue.put(new EmailJob("job-" + i));
+        for (int i = 1; i <= 5; i++) {
+            scheduler.submitJob(new EmailJob("job-" + i));
         }
 
-
-        while(completedJobs.get() < 30){
-            Thread.sleep(100);
+        while (scheduler.getCompletedJobs() < 6){
+            Thread.sleep(50);
         }
 
-        worker1.interrupt();
-        worker2.interrupt();
-        worker3.interrupt();
+        System.out.println("\n--- Final Job Statuses ---");
 
-        worker1.join();
-        worker2.join();
-        worker3.join();
+        System.out.println(
+                "job-1: " + scheduler.getJobStatus("job-1")
+        );
 
-        long endTime = System.currentTimeMillis();
+        System.out.println(
+                "job-fail: " + scheduler.getJobStatus("job-fail")
+        );
 
-        System.out.println("All jobs finished.");
+        System.out.println(
+                "job-2: " + scheduler.getJobStatus("job-2")
+        );
 
-        long executionTime = endTime - startTime;
+        scheduler.shutdown();
+    }
 
-        System.out.println("Execution time : " + executionTime + " ms");
-
+    private static boolean isTerminal(JobStatus status) {
+        return status == JobStatus.COMPLETED
+                || status == JobStatus.FAILED;
     }
 }

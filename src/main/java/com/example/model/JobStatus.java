@@ -1,4 +1,8 @@
 package com.example.model;
 
-public class JobStatus {
+public enum JobStatus {
+    PENDING,
+    RUNNING,
+    COMPLETED,
+    FAILED
 }
