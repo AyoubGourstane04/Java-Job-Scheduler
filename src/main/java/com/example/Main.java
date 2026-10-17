@@ -3,44 +3,37 @@ package com.example;
 import com.example.core.JobScheduler;
 import com.example.jobs.EmailJob;
 import com.example.jobs.FailingJob;
+import com.example.jobs.LongRunningJob;
 import com.example.model.JobStatus;
 
 
 public class Main {
-    public static void main(String[] args)
-            throws Exception {
+    public static void main(String[] args) throws InterruptedException {
 
-        JobScheduler scheduler = new JobScheduler(3, 10);
+        JobScheduler scheduler = new JobScheduler(3, 10, 2);
+
+        scheduler.submitJob(new EmailJob("job-1"));
+        scheduler.submitJob(new EmailJob("job-2"));
 
         scheduler.submitJob(new FailingJob("job-fail"));
 
-        for (int i = 1; i <= 5; i++) {
-            scheduler.submitJob(new EmailJob("job-" + i));
-        }
+        scheduler.submitJob(new LongRunningJob("job-timeout"));
 
-        while (scheduler.getCompletedJobs() < 6){
-            Thread.sleep(50);
-        }
+        Thread.sleep(1500);
 
-        System.out.println("\n--- Final Job Statuses ---");
+        scheduler.submitJob(new LongRunningJob("job-cancel"));
 
-        System.out.println(
-                "job-1: " + scheduler.getJobStatus("job-1")
-        );
+        Thread.sleep(1000);
 
-        System.out.println(
-                "job-fail: " + scheduler.getJobStatus("job-fail")
-        );
-
-        System.out.println(
-                "job-2: " + scheduler.getJobStatus("job-2")
-        );
+        boolean cancelled = scheduler.cancelJob("job-cancel");
+        System.out.println("Cancellation requested: " + cancelled);
 
         scheduler.shutdown();
+
+        System.out.println("\n========== FINAL STATISTICS ==========");
+        System.out.println("Completed jobs: " + scheduler.getCompletedJobs());
+        System.out.println("Finished jobs: " + scheduler.getFinishedJobs());
+        System.out.println("Scheduler state: " + scheduler.getState());
     }
 
-    private static boolean isTerminal(JobStatus status) {
-        return status == JobStatus.COMPLETED
-                || status == JobStatus.FAILED;
-    }
 }
