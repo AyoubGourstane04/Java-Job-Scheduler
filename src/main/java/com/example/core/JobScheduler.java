@@ -1,13 +1,12 @@
 package com.example.core;
 
-import com.example.model.Job;
-import com.example.model.JobStatus;
-import com.example.model.SchedulerState;
+import com.example.model.*;
 
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class JobScheduler {
@@ -28,6 +27,8 @@ public class JobScheduler {
     private final Map<String, ScheduledFuture<?>> timeoutTasks = new ConcurrentHashMap<>();
     private final long jobTimeout = 5;
     private final Set<String> finalizedJobs = ConcurrentHashMap.newKeySet();
+    private final AtomicLong sequenceCount = new AtomicLong(0);
+
 
     public JobScheduler(int workerCount, int queueCapacity, int maxRetries){
         if(workerCount <= 0){
@@ -73,6 +74,33 @@ public class JobScheduler {
                throw e;
            }
        }
+
+    }
+
+    public void submitJob(Job job, JobPriority priority) throws InterruptedException{
+        long sequenceNbr = this.sequenceCount.incrementAndGet();
+
+        PrioritizedJob prioritizedJob = new PrioritizedJob(job, priority, sequenceNbr);
+
+        synchronized (submissionLock){
+            if(state.get() != SchedulerState.RUNNING){
+                throw new IllegalArgumentException("Scheduler is shutting down");
+            }
+
+            if(statuses.putIfAbsent(job.getId(), JobStatus.PENDING) != null){
+                throw new IllegalArgumentException("Duplicate job ID : " + job.getId());
+            }
+
+            this.oustandingJobs.incrementAndGet();
+
+            try{
+                queue.put(job);
+            }catch (InterruptedException e){
+                this.oustandingJobs.decrementAndGet();
+                statuses.remove(job.getId(), JobStatus.PENDING);
+                throw e;
+            }
+        }
 
     }
 
