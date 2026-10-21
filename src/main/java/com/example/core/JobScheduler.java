@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class JobScheduler {
-    private final BlockingQueue<Job> queue;
+    private final BoundedPriorityJobQueue queue;
     private final ConcurrentHashMap<String, JobStatus> statuses = new ConcurrentHashMap<>();
     private final AtomicInteger completedJobs = new AtomicInteger();
     private final AtomicInteger finishedJobs = new AtomicInteger();
@@ -19,7 +19,7 @@ public class JobScheduler {
     private final Object submissionLock = new Object();
     private final int maxRetries;
     private final Map<String, Integer> attempts = new ConcurrentHashMap<>();
-    private final AtomicInteger oustandingJobs = new AtomicInteger(0);
+    private final AtomicInteger outstandingJobs = new AtomicInteger(0);
     private final ScheduledExecutorService retryScheduler = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, Thread> runningThreads = new ConcurrentHashMap<>();
     private final Set<String> cancellationRequests = ConcurrentHashMap.newKeySet();
@@ -40,10 +40,10 @@ public class JobScheduler {
         }
 
         if(maxRetries < 0){
-            throw new IllegalArgumentException("Maximum retries must be positive.");
+            throw new IllegalArgumentException("Maximum retries cannot be negative.");
         }
 
-        this.queue = new LinkedBlockingQueue<>(queueCapacity);
+        this.queue = new BoundedPriorityJobQueue(queueCapacity);
         this.workers = new Thread[workerCount];
         this.maxRetries = maxRetries;
 
@@ -54,52 +54,45 @@ public class JobScheduler {
 
     }
 
-    public void submitJob(Job job) throws InterruptedException{
-       synchronized (submissionLock){
-           if(state.get() != SchedulerState.RUNNING){
-               throw new IllegalArgumentException("Scheduler is shutting down");
-           }
 
-           if(statuses.putIfAbsent(job.getId(), JobStatus.PENDING) != null){
-               throw new IllegalArgumentException("Duplicate job ID : " + job.getId());
-           }
-
-           this.oustandingJobs.incrementAndGet();
-
-           try{
-               queue.put(job);
-           }catch (InterruptedException e){
-               this.oustandingJobs.decrementAndGet();
-               statuses.remove(job.getId(), JobStatus.PENDING);
-               throw e;
-           }
-       }
-
-    }
-
-    public void submitJob(Job job, JobPriority priority) throws InterruptedException{
-        long sequenceNbr = this.sequenceCount.incrementAndGet();
-
-        PrioritizedJob prioritizedJob = new PrioritizedJob(job, priority, sequenceNbr);
+    public void submitJob(Job job, JobPriority priority) {
+        if(job == null || priority == null){
+            throw new IllegalArgumentException("Job and Priority cannot be null");
+        }
 
         synchronized (submissionLock){
-            if(state.get() != SchedulerState.RUNNING){
-                throw new IllegalArgumentException("Scheduler is shutting down");
+            if (state.get() != SchedulerState.RUNNING) {
+                throw new IllegalStateException("Scheduler is Shutting down");
             }
 
-            if(statuses.putIfAbsent(job.getId(), JobStatus.PENDING) != null){
-                throw new IllegalArgumentException("Duplicate job ID : " + job.getId());
+            String jobId = job.getId();
+
+            if(jobId == null || jobId.isBlank()){
+                throw new IllegalArgumentException("Job ID Invalid");
             }
 
-            this.oustandingJobs.incrementAndGet();
-
-            try{
-                queue.put(job);
-            }catch (InterruptedException e){
-                this.oustandingJobs.decrementAndGet();
-                statuses.remove(job.getId(), JobStatus.PENDING);
-                throw e;
+            if (statuses.putIfAbsent(jobId, JobStatus.PENDING) != null) {
+                throw new IllegalArgumentException("Duplicate JobID : " + jobId);
             }
+
+            long seq = sequenceCount.incrementAndGet();
+            PrioritizedJob prioritizedJob = new PrioritizedJob(job, priority, seq);
+
+            outstandingJobs.incrementAndGet();
+            attempts.put(jobId, 0);
+
+            if (!queue.offer(prioritizedJob)) {
+                statuses.remove(jobId, JobStatus.PENDING);
+                attempts.remove(jobId);
+                outstandingJobs.decrementAndGet();
+                throw new IllegalStateException("Queue is Full");
+            }
+
+            System.out.println(
+                    "Submitted job " + jobId
+                            + " with priority " + priority
+            );
+
         }
 
     }
@@ -123,15 +116,16 @@ public class JobScheduler {
     private void workerLoop() {
         while(true){
             try{
-                Job job = queue.poll(100, TimeUnit.MILLISECONDS);
+                PrioritizedJob prioritizedJob = queue.poll(100, TimeUnit.MILLISECONDS);
 
-                if (job == null){
-                    if(state.get() == SchedulerState.SHUTTING_DOWN && oustandingJobs.get() == 0){
+                if (prioritizedJob == null){
+                    if(state.get() == SchedulerState.SHUTTING_DOWN && outstandingJobs.get() == 0){
                         break;
                     }
                     continue;
                 }
 
+                Job job = prioritizedJob.getJob();
                 String jobId = job.getId();
                 Thread worker = Thread.currentThread();
 
@@ -179,7 +173,7 @@ public class JobScheduler {
                         );
 
                         if (attemptNumber <= this.maxRetries) {
-                            scheduleRetry(job, attemptNumber);
+                            scheduleRetry(prioritizedJob, attemptNumber);
                         } else {
                             System.err.println(
                                     "Job " + job.getId()
@@ -197,7 +191,7 @@ public class JobScheduler {
                     }
                 }
             }catch (InterruptedException e) {
-                if(state.get() == SchedulerState.SHUTTING_DOWN && queue.isEmpty()){
+                if(state.get() == SchedulerState.SHUTTING_DOWN && queue.isEmpty() && outstandingJobs.get() == 0){
                     break;
                 }
             }
@@ -231,8 +225,10 @@ public class JobScheduler {
 
     }
 
-    private void scheduleRetry(Job job, int attemptNumber){
+    private void scheduleRetry(PrioritizedJob prioritizedJob, int attemptNumber){
         long delay = Math.min(1L << (attemptNumber - 1), 8L);
+
+        Job job = prioritizedJob.getJob();
 
         System.out.println(
                 "Scheduling retry for job " + job.getId()
@@ -240,17 +236,26 @@ public class JobScheduler {
         );
 
         retryScheduler.schedule(() -> {
+
             try {
-                queue.put(job);
+                if(finalizedJobs.contains(job.getId())){
+                    return;
+                }
+
+                if(cancellationRequests.contains(job.getId())){
+                    finalizeJob(job.getId(), JobStatus.CANCELLED);
+                    return;
+                }
+
                 statuses.put(job.getId(), JobStatus.PENDING);
+                queue.put(prioritizedJob);
+
             }catch (InterruptedException e){
                 Thread.currentThread().interrupt();
-                statuses.put(job.getId(), JobStatus.FAILED);
-                finishedJobs.incrementAndGet();
-                oustandingJobs.decrementAndGet();
                 System.err.println(
                         "Could not schedule retry for " + job.getId()
                 );
+                finalizeJob(job.getId(), JobStatus.FAILED);
             }
         }, delay, TimeUnit.SECONDS);
     }
@@ -279,7 +284,7 @@ public class JobScheduler {
         }
 
         finishedJobs.incrementAndGet();
-        oustandingJobs.decrementAndGet();
+        outstandingJobs.decrementAndGet();
 
         System.out.println(
                 "Job " + jobId + " finalized as " + finalStatus
